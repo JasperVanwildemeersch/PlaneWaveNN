@@ -1,6 +1,6 @@
 #This is a more vectorized version of the previous synthStochFieldInde code used in SpatialCorrelation. It is also adjusted for the superposition of P and S waves.
 
-def synth_stoch_field_vectorized(xyz, kP, kS, khatP, khatS, phaseP, phaseS, polS):
+def synthStochField(xyz, kP, kS, khatP, khatS, phaseP, phaseS, polS):
     # shapes
     Npts = xyz.shape[0]
     Nwaves = khatP.shape[0]
