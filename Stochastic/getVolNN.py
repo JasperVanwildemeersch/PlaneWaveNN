@@ -1,6 +1,6 @@
 #     Vectorized getVolNN for already computed displacement uTot at positions xyz.
 
-def get_vol_nn_vectorized(uTot, xyz, zCav):
+def getVolNN(uTot, xyz, zCav):
     # Inputs:
     #  uTot: (Npts,3) complex displacement vectors
     #  xyz: (Npts,3) positions
