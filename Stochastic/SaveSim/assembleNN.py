@@ -10,41 +10,30 @@ def load_sim_file(filepath):
             data = np.load(npz_path, allow_pickle=True)
             return dict(data)
         raise FileNotFoundError(f"File not found: {filepath} (also tried {npz_path})")
-
-    # load .mat
+    
     mat = loadmat(filepath, squeeze_me=True, struct_as_record=False)
-    # MATLAB .mat often contains field names and meta-entries; we pick out the arrays we need
     return mat
 
 def get_array(matdict, key):
+    #Extract array from MATLAB dictionary
     if key in matdict:
-        arr = matdict[key]
-
+        return np.asarray(matdict[key])
         # unwrap MATLAB object arrays
-        try:
-            return np.asarray(arr)
-        except Exception:
-            pass
-    # search inside nested structures (MATLAB sometimes nests fields)
+
     for k, v in matdict.items():
         if isinstance(v, dict) and key in v:
-            try:
-                return np.asarray(v[key])
-            except Exception:
-                pass
-
+            return np.asarray(v[key])
     raise KeyError(f"Variable '{key}' not found in MAT-file.")
 
-
 def assemble_nn(fAll=None, sim_dir='SaveSim', prefix='NewFreq', rho=2800.0, G=6.67430e-11):
-
     #Returns:
-    #  (fAll, IVolEst, ISurfEst, ITotEst), figure.
+    #  (fAll, IVolEst, ISurfEst, ITotEst), figure.    
+    
     if fAll is None:
         fAll = np.array([2.0, 4.0])
     else:
         fAll = np.asarray(fAll, dtype=float)
-
+    
     lenF = len(fAll)
     IVolEst = np.zeros((lenF, 3), dtype=float)
     ISurfEst = np.zeros((lenF, 3), dtype=float)
@@ -56,43 +45,43 @@ def assemble_nn(fAll=None, sim_dir='SaveSim', prefix='NewFreq', rho=2800.0, G=6.
         try:
             data = load_sim_file(fname_mat)
         except FileNotFoundError:
-            # try without sim_dir (in case files are in cwd)
             fname_mat = f"{prefix}{f_str}Hz.mat"
             data = load_sim_file(fname_mat)
 
-        try:
-            uCavASDX = get_array(data, 'uCavASDX').astype(np.complex128)
-            uCavASDY = get_array(data, 'uCavASDY').astype(np.complex128)
-            uCavASDZ = get_array(data, 'uCavASDZ').astype(np.complex128)
+        # Load arrays
+        uCavASDX = get_array(data, 'uCavASDX')
+        uCavASDY = get_array(data, 'uCavASDY')
+        uCavASDZ = get_array(data, 'uCavASDZ')
+        IVolTotAll = get_array(data, 'IVolTotAll')
+        ISurfTotAll = get_array(data, 'ISurfTotAll')
 
-            IVolTotAll = get_array(data, 'IVolTotAll').astype(np.complex128)
-            ISurfTotAll = get_array(data, 'ISurfTotAll').astype(np.complex128)
-        except KeyError as e:
-            raise RuntimeError(f"Cannot find expected variable in {fname_mat}: {e}")
+        # Ensure proper dimensions and select current frequency
+        if uCavASDX.ndim > 1:
+            uCavASDX_f = uCavASDX[:, i] if uCavASDX.shape[1] >= lenF else uCavASDX.ravel()
+            uCavASDY_f = uCavASDY[:, i] if uCavASDY.shape[1] >= lenF else uCavASDY.ravel()
+            uCavASDZ_f = uCavASDZ[:, i] if uCavASDZ.shape[1] >= lenF else uCavASDZ.ravel()
+        else:
+            uCavASDX_f = uCavASDX
+            uCavASDY_f = uCavASDY
+            uCavASDZ_f = uCavASDZ
 
-        # Ensure shapes
-        def ensure_2d(arr):
-            a = np.array(arr, copy=False)
-            if a.ndim == 1:
-                return a.reshape((-1, 1))  # (N,) -> (N,1)
-            return a
+        if IVolTotAll.ndim == 3 and IVolTotAll.shape[1] >= lenF:
+            IVolTotAll_f = IVolTotAll[:, i, :]
+            ISurfTotAll_f = ISurfTotAll[:, i, :]
+        else:
+            IVolTotAll_f = IVolTotAll
+            ISurfTotAll_f = ISurfTotAll
 
-        uCavASDX = np.atleast_1d(uCavASDX).astype(np.complex128).ravel()
-        uCavASDY = np.atleast_1d(uCavASDY).astype(np.complex128).ravel()
-        uCavASDZ = np.atleast_1d(uCavASDZ).astype(np.complex128).ravel()
+        # Compute scalars safely
+        sFASDX = float(np.mean(np.abs(uCavASDX_f)))
+        sFASDY = float(np.mean(np.abs(uCavASDY_f)))
+        sFASDZ = float(np.mean(np.abs(uCavASDZ_f)))
 
-        IVolTotAll = np.atleast_2d(IVolTotAll).astype(np.complex128)
-        ISurfTotAll = np.atleast_2d(ISurfTotAll).astype(np.complex128)
+        rms_IVol = np.sqrt(np.mean(np.abs(IVolTotAll_f)**2, axis=0))
+        rms_ISurf = np.sqrt(np.mean(np.abs(ISurfTotAll_f)**2, axis=0))
+        rms_ITot = np.sqrt(np.mean(np.abs(IVolTotAll_f - ISurfTotAll_f)**2, axis=0))
 
-        # Compute single-frequency cavity ASD scaling: sFASD = 1 / sqrt(mean(abs(uCavASD)^2))
-        sFASDX = 1.0 / np.sqrt(np.mean(np.abs(uCavASDX)**2))
-        sFASDY = 1.0 / np.sqrt(np.mean(np.abs(uCavASDY)**2))
-        sFASDZ = 1.0 / np.sqrt(np.mean(np.abs(uCavASDZ)**2))
-
-        rms_IVol = np.sqrt(np.mean(np.abs(IVolTotAll)**2, axis=0))  # length at least 3
-        rms_ISurf = np.sqrt(np.mean(np.abs(ISurfTotAll)**2, axis=0))
-        rms_ITot = np.sqrt(np.mean(np.abs(IVolTotAll - ISurfTotAll)**2, axis=0))
-        # Multiply by G * rho * sFASD per component
+        # Multiply by G*rho*sFASD per component
         IVolEst[i, 0] = G * rho * sFASDX * rms_IVol[0]
         IVolEst[i, 1] = G * rho * sFASDY * rms_IVol[1]
         IVolEst[i, 2] = G * rho * sFASDZ * rms_IVol[2]
@@ -107,7 +96,7 @@ def assemble_nn(fAll=None, sim_dir='SaveSim', prefix='NewFreq', rho=2800.0, G=6.
 
         print(f"Processed frequency {f_str} Hz -> file {fname_mat}")
 
-#plot
+    # Plot
     comps = ['X', 'Y', 'Z']
     fig, axes = plt.subplots(1, 3, figsize=(16, 5), sharey=True)
     for idx, ax in enumerate(axes):
@@ -121,14 +110,12 @@ def assemble_nn(fAll=None, sim_dir='SaveSim', prefix='NewFreq', rho=2800.0, G=6.
             ax.set_ylabel('NN ASD (m/s^2 / √Hz)')
         ax.legend()
         ax.grid(True)
-
     plt.tight_layout()
+    plt.savefig("AssembleNN23456", dpi=360)
     plt.show()
 
     return fAll, IVolEst, ISurfEst, ITotEst
 
-
 if __name__ == '__main__':
-    # example usage: adapt fAll to the files you have in SaveSim folder
-    frequencies = [2.0, 4.0]
+    frequencies = [2.0, 3.0, 4.0, 5.0, 6.0]
     assemble_nn(fAll=frequencies, sim_dir='SaveSim', prefix='NewFreq')
