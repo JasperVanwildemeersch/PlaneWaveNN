@@ -1,3 +1,7 @@
+# this script estimates the Newtonian acceleration from a stochastic underground seismic field produced from a superposition of plane P and S waves
+
+# The script works for fAll containing only 1 frequency: the code must be run for each frequency separately to store each file separately.
+
 # Vectorized, optimized stochastic plane-wave Newtonian-noise simulation
 # Implements optimizations:
 #  Vectorize P+S wave superposition
@@ -20,11 +24,11 @@ def buildPolarUnitVectors(thetaFlat, phiFlat):
     uy = sinT * sinP
     uz = cosT
     return np.column_stack((ux, uy, uz))
-
+    
 def computeShSvPolarizations(khatS):
-
     #Given khatS (Nwaves,3) compute two orthonormal perpendicular vectors for each wave and produce a random polarization polS = cos(a)*eSH + sin(a)*eSV given mix angles passed externally.
-    #Returns eSH, eSV (unit)
+    #input: propagation direction of s-wave
+    #output: unit vector components sh and sv, perpendicular to propagation direction, linear combination of these gives s-wave polarization/displacement
     Nwaves = khatS.shape[0]
     eSH = np.zeros_like(khatS)
     eSV = np.zeros_like(khatS)
@@ -53,7 +57,7 @@ sim_case = "halfSpace"  # "fullSpace" or "halfSpace"
 vP = 4000.0  
 vS = 3000.0  
 rho = 2800.0  # (kg/m^3)
-nRea = 1    # number of realizations
+nRea = 100    # number of realizations
 Nwaves = 100  # plane waves per realization
 G = 6.67430e-11  # gravitational constant
 fAll = [4.0]    # frequencies in Hz
@@ -77,16 +81,22 @@ if sim_case == "halfSpace":
         # fix last to match nR exactly
         pointsPerRegion[-1] = nR - sum(pointsPerRegion[:-1])
 
-    r_subs = []
-    w_subs = []
+    r_subs = [] #r_subs = quadrature nodes
+    w_subs = [] #w_subs = quadrature weights
     for n_pts, (low, high) in zip(pointsPerRegion, zip(bounds[:-1], bounds[1:])):
         r_sub, w_sub = lgwt(n_pts, low, high)
         r_subs.append(r_sub)
         w_subs.append(w_sub)
+
+    #rVec: array of radius values, rVec[i] is a radial shell, wR[i] gives the integration weight of this shell
     rVec = np.concatenate(r_subs)
     wR = np.concatenate(w_subs)
+    
+    # Theta: Integrate over θ∈[π/2,π] since θ is angle with z-axis: surface is at θ = π/2, downward direction is θ = π
     theta1, theta2 = np.pi/2, np.pi
     theta, wTheta = lgwt(nTheta, theta1, theta2)
+    
+    #phi: azimuthal angle: uniform distribution φ∈[0,2π]
     phi = np.linspace(0, 2*np.pi, nPhi, endpoint=False)
     wPhi = 2*np.pi / nPhi
 elif sim_case == "fullSpace":
@@ -124,12 +134,12 @@ thetaFlat = TH.T.flatten()  # ensure theta varies fastest similar to MATLAB's me
 phiFlat = PH.T.flatten()
 Nang = thetaFlat.size
 
-# unit direction vectors for all angular points (Nang,3)
+# unit direction vectors for all angular points (Nang,3) in carthesian coordinates
 unitDirs = buildPolarUnitVectors(thetaFlat, phiFlat)  # columns [sinθ cosφ, sinθ sinφ, cosθ]
 
 # angular quadrature weights (independent of r)
-wtTheta = np.tile(wTheta, nPhi)   # (nTheta*nPhi,) if wTheta is (nTheta,)
-angularWeights = np.sin(thetaFlat) * wtTheta * wPhi   # (Nang,)
+wtTheta = np.tile(wTheta, nPhi)   # (nTheta*nPhi,) so we must have wTheta nPhi times
+angularWeights = np.sin(thetaFlat) * wtTheta * wPhi   # (Nang,) actual computation of the angular weights dependent of both (theta, phi)
 
 # Precompute full coordinate grid (nR x Nang)
 
@@ -144,19 +154,28 @@ z_all = (rVec[:, None].astype(dtype_coord)) * unitDirs[None, :, 2]
 
 # Precompute cavity mask once (nR, Nang)
 
-cavity_mask = (x_all**2 + y_all**2 + (z_all - zCav)**2) < (rCav**2)  # boolean
+cavity_mask = (x_all**2 + y_all**2 + (z_all - zCav)**2) < (rCav**2)  # boolean, True when inside cavity
 
 # Precompute flattened indices for all non-cavity points
+#gives indices of grid points outside cavity
 r_inds, ang_inds = np.nonzero(~cavity_mask)   # arrays of same length = Npoints_total
 Npoints_total = r_inds.size
 
 # Precompute arrays needed for volume integration weights later
+#select grid points (r>rCav) outside cavity with their weights
 r_vals = rVec[r_inds]          # (Npoints_total,)
 wr_vals = wR[r_inds]           # radial GL weights for each point
 w_ang_vals = angularWeights[ang_inds]  # angular quadrature weight for each angular index
+
 # Prepare surface integration unit normals and weights for outer shell (r = rVec[-1])
+
+#check if surface is in cavity, if not then True
 outer_mask = ~cavity_mask[-1]   # (Nang,)
+
+#Create all grid points [theta, phi] on the spherical shell with r=rMax, so the integration surface and their weights
 thetaPhi, weights_surf = createSurfPoints(np.max(rVec), nTheta, nPhi, theta1, theta2)
+
+#This constructs the outward unit normal vector at each surface point:
 dsUnitVec_all = np.column_stack((np.sin(thetaPhi[:,0]) * np.cos(thetaPhi[:,1]),
                                  np.sin(thetaPhi[:,0]) * np.sin(thetaPhi[:,1]),
                                  np.cos(thetaPhi[:,0])))  # (Nang,3)
@@ -174,18 +193,24 @@ t_start = time.time()
 for reaNo in range(nRea):
     print(f"Realization {reaNo+1}/{nRea}", flush=True)
     # Random wave parameters for this realization (precompute)
-    
+
+    #P-waves
     # random directions on sphere (theta: [0,pi], phi: [0,2pi])
+    # random phase [0,2pi]
     thetaWP = np.arccos(2*np.random.rand(Nwaves) - 1.0)   # (Nwaves,)
     phiWP = 2.0 * np.pi * np.random.rand(Nwaves)
     phaseP = 2.0 * np.pi * np.random.rand(Nwaves)
 
+    #S-waves
     thetaWS = np.arccos(2*np.random.rand(Nwaves) - 1.0)
     phiWS = 2.0 * np.pi * np.random.rand(Nwaves)
     phaseS = 2.0 * np.pi * np.random.rand(Nwaves)
 
+    #random polarization angle [0, 2pi] used in combination with ComputeShSvPolarization: polS = cos(mixAngle) * eSH + sin(mixAngle) * eSV
     mixAngle = 2.0 * np.pi * np.random.rand(Nwaves)  # polarization mix angle
+    
     # compute khatP, khatS (Nwaves,3)
+    #Compute cartesian unit vectors from spherical angles
     khatP = np.column_stack((np.sin(thetaWP)*np.cos(phiWP),
                              np.sin(thetaWP)*np.sin(phiWP),
                              np.cos(thetaWP)))
@@ -195,21 +220,30 @@ for reaNo in range(nRea):
     # k magnitudes
     # but we'll compute kP = omega/vP per frequency below
 
-    # compute SH/SV basis vectors for S waves (Nwaves,3)
+    #S-waves: basis vecors for displacement (perpendicular to propagation)
     eSH, eSV = computeShSvPolarizations(khatS)
     polS = np.cos(mixAngle)[:,None] * eSH + np.sin(mixAngle)[:,None] * eSV  # (Nwaves,3)
 
+    # This loop computes the response at each frequency, using the wave directions and phases for this realization determined earlier
     for fNo, f in enumerate(fAll):
-        omega = 2.0 * np.pi * f
-        kP = omega / vP
+        omega = 2.0 * np.pi * f # ω=2πf
+        kP = omega / vP # k=ω/v
         kS = omega / vS
+        
         # Evaluate displacement at cavity center
+
+        #cavity coordinates
         xyz_cav = np.array([[xCav, yCav, zCav]], dtype=np.float64)
-        uP_cav, uS_cav = synthStochField(xyz_cav, kP, kS, khatP, khatS, phaseP, phaseS, polS)
+        
+        #calculate displacement at the cavity due to the stochastic superposition of seismic waves
+        uP_cav, uS_cav = synth_stoch_field_vectorized(xyz_cav, kP, kS, khatP, khatS, phaseP, phaseS, polS)
         uCavTot = uP_cav + uS_cav
-        uCavASDX[reaNo, fNo] = np.abs(uCavTot[0,0])
-        uCavASDY[reaNo, fNo] = np.abs(uCavTot[0,1])
-        uCavASDZ[reaNo, fNo] = np.abs(uCavTot[0,2])
+
+        #Extract ASD x- y- and z-components and store for each realization and frequency
+        uCavASDX[reaNo, fNo] = np.abs(uCavTot[0,0]) #Why abs(): The displacement is complex:u=A*e^(−iϕ), so amplitude A = |u|
+        uCavASDY[reaNo, fNo] = np.abs(uCavTot[0,1]) #shape (nRea, nFreq)
+        uCavASDZ[reaNo, fNo] = np.abs(uCavTot[0,2]) #Example: uCavASDZ[reaNo, fNo] = |u_z(f)| for this realization
+        #So for each realization (reaNo) and frequency (fNo) you store the displacement amplitude along each axis.
 
         # Evaluate the synthetic field on ALL non-cavity points (all radii x angular)
         # We create xyz_points once per realization & freq (vectorized).
